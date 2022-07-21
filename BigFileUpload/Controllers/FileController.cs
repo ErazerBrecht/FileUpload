@@ -1,8 +1,6 @@
 using BigFileUpload.SeedWork;
 using BigFileUpload.Services;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.AspNetCore.WebUtilities;
-using Microsoft.Net.Http.Headers;
 
 namespace BigFileUpload.Controllers;
 
@@ -11,19 +9,19 @@ namespace BigFileUpload.Controllers;
 public class FileController : ControllerBase
 {
     private readonly ILogger<FileController> _logger;
-    private readonly IMultiPartFileUploadService _multiPartFileUploadService;
+    private readonly IFileService _fileService;
 
-    public FileController(ILogger<FileController> logger, IMultiPartFileUploadService multiPartFileUploadService)
+    public FileController(ILogger<FileController> logger, IFileService fileService)
     {
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-        _multiPartFileUploadService = multiPartFileUploadService ?? throw new ArgumentNullException(nameof(multiPartFileUploadService));
+        _fileService = fileService ?? throw new ArgumentNullException(nameof(fileService));
     }
 
     [HttpPost]
     [FileUploadOperation.FileContentType]
     public async Task<IActionResult> Post()
     {
-        if (!_multiPartFileUploadService.IsMultipartContentType(Request.ContentType))
+        if (!_fileService.IsMultipartContentType(Request.ContentType))
         {
             ModelState.AddModelError("File", $"The request couldn't be processed");
             return BadRequest(ModelState);
@@ -31,10 +29,7 @@ public class FileController : ControllerBase
         
         try
         {
-            var boundary = _multiPartFileUploadService.GetBoundary(MediaTypeHeaderValue.Parse(Request.ContentType));
-            var reader = new MultipartReader(boundary, HttpContext.Request.Body);
-            
-            return await _multiPartFileUploadService.UploadFile(reader) ? Ok() : BadRequest();
+            return await _fileService.UploadFile() ? Ok() : BadRequest();
         }
         catch (Exception ex)
         {
@@ -44,11 +39,8 @@ public class FileController : ControllerBase
     }
     
     [HttpGet("{name}")]
-    public async Task<FileStreamResult> Download(string name)
+    public async Task Download(string name)
     {
-        var folderPath = Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, "UploadedFiles"));
-        var filePath = Path.Combine(folderPath, name);
-        var stream = System.IO.File.OpenRead(filePath);
-        return new FileStreamResult(stream, "application/octet-stream");
+        await _fileService.DownloadFile(name);
     }
 }

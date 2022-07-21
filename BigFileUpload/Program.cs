@@ -4,9 +4,10 @@ using BigFileUpload.Services;
 var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.ConfigureKestrel(x => x.Limits.MaxRequestBodySize = 5368709120);
 
+builder.Services.AddHttpContextAccessor();
 builder.Services.AddControllers();
 builder.Services.AddSwaggerGen(options => options.OperationFilter<FileUploadOperation>());
-builder.Services.AddMultiPartFileUploader();
+builder.Services.AddFileService();
 
 var app = builder.Build();
 
