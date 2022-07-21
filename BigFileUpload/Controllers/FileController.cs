@@ -42,4 +42,13 @@ public class FileController : ControllerBase
             throw;
         }
     }
+    
+    [HttpGet("{name}")]
+    public async Task<FileStreamResult> Download(string name)
+    {
+        var folderPath = Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, "UploadedFiles"));
+        var filePath = Path.Combine(folderPath, name);
+        var stream = System.IO.File.OpenRead(filePath);
+        return new FileStreamResult(stream, "application/octet-stream");
+    }
 }
