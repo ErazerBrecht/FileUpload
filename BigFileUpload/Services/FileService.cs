@@ -24,44 +24,44 @@ internal class FileService : IFileService
 {
     private readonly IDataProtector _protector;
     private readonly HttpContext _httpContext;
-    
-    public FileService(IDataProtectionProvider  dataProtectionProvider, IHttpContextAccessor httpContextAccessor)
+
+    public FileService(IDataProtectionProvider dataProtectionProvider, IHttpContextAccessor httpContextAccessor)
     {
         _protector = dataProtectionProvider.CreateProtector("ErazerBrecht.Files.V1");
         _httpContext = httpContextAccessor?.HttpContext ?? throw new ArgumentException(null, nameof(httpContextAccessor));
     }
-    
+
     public async Task<bool> UploadFile()
     {
         var boundary = GetBoundary(MediaTypeHeaderValue.Parse(_httpContext.Request.ContentType));
         var reader = new MultipartReader(boundary, _httpContext.Request.Body);
-        
+
         var section = await reader.ReadNextSectionAsync();
-      
+
         var hasContentDispositionHeader = ContentDispositionHeaderValue.TryParse(
             section.ContentDisposition, out var contentDisposition);
 
-        if (!hasContentDispositionHeader || !HasFileContentDisposition(contentDisposition)) 
+        if (!hasContentDispositionHeader || !HasFileContentDisposition(contentDisposition))
             return false;
-        
+
         var filePath = Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, "UploadedFiles"));
         await using var fileStream = File.Create(Path.Combine(filePath, contentDisposition!.FileName.Value));
-            
+
         // AES Key generation
         using var aes = Aes.Create();
         var encryptor = aes.CreateEncryptor(aes.Key, aes.IV);
-            
+
         // Add AES key encrypted with 'DataProtector' in file
         var keys = new byte[aes.Key.Length + aes.IV.Length];
         Buffer.BlockCopy(aes.Key, 0, keys, 0, aes.Key.Length);
         Buffer.BlockCopy(aes.IV, 0, keys, aes.Key.Length, aes.IV.Length);
-        var encryptedKeys = _protector.Protect(keys);                   // Results in 148 bytes
+        var encryptedKeys = _protector.Protect(keys); // Results in 148 bytes
         await fileStream.WriteAsync(encryptedKeys);
-            
+
         // Encrypt content
         await using var cryptoStream = new CryptoStream(fileStream, encryptor, CryptoStreamMode.Write);
         await section.Body.CopyToAsync(cryptoStream);
-        
+
         return true;
     }
 
@@ -71,11 +71,11 @@ internal class FileService : IFileService
         var filePath = Path.Combine(folderPath, fileName);
 
         await using var stream = File.OpenRead(filePath);
-        
+
         // Get encrypted AES key
         var encryptedKeys = new byte[148];
         var _ = await stream.ReadAsync(encryptedKeys.AsMemory(0, 148));
-        
+
         // Decrypt AES key + Creating AES decryptor
         var decryptedKeys = _protector.Unprotect(encryptedKeys);
         using var aes = Aes.Create();
@@ -84,10 +84,10 @@ internal class FileService : IFileService
         aes.Key = decryptedKeys.AsMemory(0, 32).ToArray();
         aes.IV = decryptedKeys.AsMemory(32, 16).ToArray();
         using var decryptor = aes.CreateDecryptor(aes.Key, aes.IV);
-            
+
         // Decrypting content
         await using var cryptoStream = new CryptoStream(stream, decryptor, CryptoStreamMode.Read);
-        
+
         // Stream to client
         _httpContext.Response.ContentType = "application/octet-stream";
         await cryptoStream.CopyToAsync(_httpContext.Response.Body);
