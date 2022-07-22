@@ -82,8 +82,6 @@ public class S3Stream : Stream
         // Send it to S3
         if (PartSize < _inputBufferStream.Position)
             WriteToS3().GetAwaiter().GetResult();
-        else
-            Console.WriteLine("YOLO");
     }
 
     public override bool CanRead => false; // TODO FIX DOWNLOAD
@@ -105,6 +103,7 @@ public class S3Stream : Stream
         });
 
         var partSize = _inputBufferStream.Position;
+        var partNumber = _partETags.Count + 1;
         _inputBufferStream.Position = 0;
         
         _partETags.Add(await _s3Service.UploadPartAsync(new UploadPartRequest
@@ -114,10 +113,11 @@ public class S3Stream : Stream
             UploadId = _uploadId,
             InputStream = _inputBufferStream,
             PartSize = partSize,
-            PartNumber = _partETags.Count + 1,
+            PartNumber = partNumber,
             IsLastPart = false
         }));
-        
+
+        Console.WriteLine($"Uploaded part {partNumber}. (Part size = {partSize}, Upload Id: {_uploadId})");
         _inputBufferStream = new MemoryStream(_inputBuffer);
     }
 }
