@@ -1,4 +1,8 @@
 ﻿using System.Security.Cryptography;
+using Amazon;
+using Amazon.S3;
+using Amazon.S3.Transfer;
+using BigFileUpload.SeedWork;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.Net.Http.Headers;
@@ -6,7 +10,7 @@ using Aes = System.Security.Cryptography.Aes;
 
 namespace BigFileUpload.Services;
 
-public static class ServiceCollectionExtensions
+public static partial class ServiceCollectionExtensions
 {
     public static IServiceCollection AddFileService(this IServiceCollection services) =>
         services.AddScoped<IFileService, FileService>();
@@ -22,12 +26,14 @@ public interface IFileService
 
 internal class FileService : IFileService
 {
+    private readonly IS3Service _s3Service;
     private readonly IDataProtector _protector;
     private readonly HttpContext _httpContext;
 
-    public FileService(IDataProtectionProvider dataProtectionProvider, IHttpContextAccessor httpContextAccessor)
+    public FileService(IDataProtectionProvider dataProtectionProvider, IS3Service s3Service, IHttpContextAccessor httpContextAccessor)
     {
         _protector = dataProtectionProvider.CreateProtector("ErazerBrecht.Files.V1");
+        _s3Service = s3Service ?? throw new ArgumentNullException(nameof(s3Service));
         _httpContext = httpContextAccessor?.HttpContext ?? throw new ArgumentException(null, nameof(httpContextAccessor));
     }
 
@@ -43,10 +49,7 @@ internal class FileService : IFileService
 
         if (!hasContentDispositionHeader || !HasFileContentDisposition(contentDisposition))
             return false;
-
-        var filePath = Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, "UploadedFiles"));
-        await using var fileStream = File.Create(Path.Combine(filePath, contentDisposition!.FileName.Value));
-
+        
         // AES Key generation
         using var aes = Aes.Create();
         var encryptor = aes.CreateEncryptor(aes.Key, aes.IV);
@@ -56,10 +59,10 @@ internal class FileService : IFileService
         Buffer.BlockCopy(aes.Key, 0, keys, 0, aes.Key.Length);
         Buffer.BlockCopy(aes.IV, 0, keys, aes.Key.Length, aes.IV.Length);
         var encryptedKeys = _protector.Protect(keys); // Results in 148 bytes
-        await fileStream.WriteAsync(encryptedKeys);
 
         // Encrypt content
-        await using var cryptoStream = new CryptoStream(fileStream, encryptor, CryptoStreamMode.Write);
+        await using var s3Stream = new S3Stream(_s3Service, Guid.NewGuid().ToString());
+        await using var cryptoStream = new CryptoStream(s3Stream, encryptor, CryptoStreamMode.Write);
         await section.Body.CopyToAsync(cryptoStream);
 
         return true;

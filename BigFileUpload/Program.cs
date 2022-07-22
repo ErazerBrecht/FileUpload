@@ -9,6 +9,7 @@ builder.Services.AddHttpContextAccessor();
 builder.Services.AddControllers();
 builder.Services.AddSwaggerGen(options => options.OperationFilter<FileUploadOperation>());
 builder.Services.AddFileService();
+builder.Services.AddS3();
 
 var app = builder.Build();
 
