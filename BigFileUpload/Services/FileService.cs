@@ -1,7 +1,5 @@
 ﻿using System.Security.Cryptography;
-using Amazon;
-using Amazon.S3;
-using Amazon.S3.Transfer;
+using Amazon.S3.Model;
 using BigFileUpload.SeedWork;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.WebUtilities;
@@ -20,12 +18,14 @@ public interface IFileService
 {
     bool IsMultipartContentType(string? contentType);
 
-    Task<bool> UploadFile();
-    Task DownloadFile(string fileName);
+    Task<bool> UploadFile(CancellationToken cancellationToken = default);
+    Task DownloadFile(string fileName, CancellationToken cancellationToken = default);
 }
 
 internal class FileService : IFileService
 {
+    private const string EncryptionKeyHeader = "EncryptionKey";
+    
     private readonly IS3Service _s3Service;
     private readonly IDataProtector _protector;
     private readonly HttpContext _httpContext;
@@ -39,12 +39,12 @@ internal class FileService : IFileService
                        throw new ArgumentException(null, nameof(httpContextAccessor));
     }
 
-    public async Task<bool> UploadFile()
+    public async Task<bool> UploadFile(CancellationToken cancellationToken = default)
     {
         var boundary = GetBoundary(MediaTypeHeaderValue.Parse(_httpContext.Request.ContentType));
         var reader = new MultipartReader(boundary, _httpContext.Request.Body);
 
-        var section = await reader.ReadNextSectionAsync();
+        var section = await reader.ReadNextSectionAsync(cancellationToken);
 
         var hasContentDispositionHeader = ContentDispositionHeaderValue.TryParse(
             section?.ContentDisposition, out var contentDisposition);
@@ -65,26 +65,27 @@ internal class FileService : IFileService
         await using var s3Stream = new S3UploadStream(_s3Service,
             $"{Guid.NewGuid().ToString()}-{contentDisposition!.FileName}", new Dictionary<string, string>
             {
-                { "EncryptionKey", Convert.ToBase64String(encryptedKeys) }
+                { EncryptionKeyHeader, Convert.ToBase64String(encryptedKeys) }
             });
         
         // Encrypt content
         await using var cryptoStream = new CryptoStream(s3Stream, encryptor, CryptoStreamMode.Write);
-        await section!.Body.CopyToAsync(cryptoStream);
+        await section!.Body.CopyToAsync(cryptoStream, cancellationToken);
 
         return true;
     }
 
-    public async Task DownloadFile(string fileName)
+    public async Task DownloadFile(string fileName, CancellationToken cancellationToken = default)
     {
-        var folderPath = Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, "UploadedFiles"));
-        var filePath = Path.Combine(folderPath, fileName);
-
-        await using var stream = File.OpenRead(filePath);
+        var metadataCollection = await _s3Service.GetMetaDataAsync(new GetObjectMetadataRequest
+        {
+            BucketName = "brecht-bigfileupload",
+            Key = fileName
+        }, cancellationToken);
 
         // Get encrypted AES key
-        var encryptedKeys = new byte[148];
-        var _ = await stream.ReadAsync(encryptedKeys.AsMemory(0, 148));
+        // TODO Check if NULL => CRASH!
+        var encryptedKeys = Convert.FromBase64String(metadataCollection[EncryptionKeyHeader.ToLower()]);
 
         // Decrypt AES key + Creating AES decryptor
         var decryptedKeys = _protector.Unprotect(encryptedKeys);
@@ -95,12 +96,20 @@ internal class FileService : IFileService
         aes.IV = decryptedKeys.AsMemory(32, 16).ToArray();
         using var decryptor = aes.CreateDecryptor(aes.Key, aes.IV);
 
+        // Start download
+        await using var downloadStream = await _s3Service.GetObjectAsync(new GetObjectRequest
+        {
+            BucketName = "brecht-bigfileupload",
+            Key = fileName
+        }, cancellationToken);
+
+        
         // Decrypting content
-        await using var cryptoStream = new CryptoStream(stream, decryptor, CryptoStreamMode.Read);
+        await using var cryptoStream = new CryptoStream(downloadStream, decryptor, CryptoStreamMode.Read);
 
         // Stream to client
         _httpContext.Response.ContentType = "application/octet-stream";
-        await cryptoStream.CopyToAsync(_httpContext.Response.Body);
+        await cryptoStream.CopyToAsync(_httpContext.Response.Body, cancellationToken);
     }
 
     public bool IsMultipartContentType(string? contentType)

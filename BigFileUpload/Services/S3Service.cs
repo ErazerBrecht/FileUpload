@@ -9,6 +9,9 @@ public interface IS3Service
     Task<string> InitiateUploadAsync(InitiateMultipartUploadRequest request, CancellationToken cancellationToken);
     Task<PartETag> UploadPartAsync(UploadPartRequest request, CancellationToken cancellationToken);
     Task CompleteUploadAsync(CompleteMultipartUploadRequest request, CancellationToken cancellationToken);
+
+    Task<MetadataCollection> GetMetaDataAsync(GetObjectMetadataRequest request, CancellationToken cancellationToken);
+    Task<Stream> GetObjectAsync(GetObjectRequest request, CancellationToken cancellationToken);
 }
 
 public static partial class ServiceCollectionExtensions
@@ -45,5 +48,17 @@ internal class S3Service : IS3Service
     public async Task CompleteUploadAsync(CompleteMultipartUploadRequest request, CancellationToken cancellationToken)
     {
         var response = await _s3Client.CompleteMultipartUploadAsync(request, cancellationToken);
+    }
+
+    public async Task<MetadataCollection> GetMetaDataAsync(GetObjectMetadataRequest request, CancellationToken cancellationToken)
+    {
+        var response = await _s3Client.GetObjectMetadataAsync(request, cancellationToken);
+        return response.Metadata;
+    }
+    
+    public async Task<Stream> GetObjectAsync(GetObjectRequest request, CancellationToken cancellationToken)
+    {
+        var response = await _s3Client.GetObjectAsync(request, cancellationToken);
+        return response.ResponseStream;
     }
 }
