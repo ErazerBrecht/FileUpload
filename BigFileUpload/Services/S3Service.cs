@@ -6,9 +6,9 @@ namespace BigFileUpload.Services;
 
 public interface IS3Service
 {
-    Task<string> InitiateUploadAsync(InitiateMultipartUploadRequest request);
-    Task<PartETag> UploadPartAsync(UploadPartRequest request);
-    Task CompleteUploadAsync(CompleteMultipartUploadRequest request);
+    Task<string> InitiateUploadAsync(InitiateMultipartUploadRequest request, CancellationToken cancellationToken);
+    Task<PartETag> UploadPartAsync(UploadPartRequest request, CancellationToken cancellationToken);
+    Task CompleteUploadAsync(CompleteMultipartUploadRequest request, CancellationToken cancellationToken);
 }
 
 public static partial class ServiceCollectionExtensions
@@ -19,23 +19,31 @@ public static partial class ServiceCollectionExtensions
 
 internal class S3Service : IS3Service
 {
+    private readonly ILogger<S3Service> _logger;
+
     private AmazonS3Client _s3Client = new("AKIAXWRSOIIHBAJYW2DP",
         "j+4IEnGX+9ompOGdSNu0qNPSiq43jVxuLbDqVE52", RegionEndpoint.EUCentral1);
-    
-    public async Task<string> InitiateUploadAsync(InitiateMultipartUploadRequest request)
+
+    public S3Service(ILogger<S3Service> logger)
     {
-        var response = await _s3Client.InitiateMultipartUploadAsync(request);
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+    }
+    
+    public async Task<string> InitiateUploadAsync(InitiateMultipartUploadRequest request, CancellationToken cancellationToken)
+    {
+        var response = await _s3Client.InitiateMultipartUploadAsync(request, cancellationToken);
         return response.UploadId;
     }
     
-    public async Task<PartETag> UploadPartAsync(UploadPartRequest request)
+    public async Task<PartETag> UploadPartAsync(UploadPartRequest request, CancellationToken cancellationToken)
     {
-        var response = await  _s3Client.UploadPartAsync(request);
+        var response = await  _s3Client.UploadPartAsync(request, cancellationToken);
+        _logger.LogInformation("Uploaded part {ResponsePartNumber}. (Part size = {RequestPartSize}, Upload Id: {RequestUploadId})", response.PartNumber, request.PartSize, request.UploadId);
         return new PartETag { PartNumber = response.PartNumber, ETag = response.ETag };
     }
 
-    public async Task CompleteUploadAsync(CompleteMultipartUploadRequest request)
+    public async Task CompleteUploadAsync(CompleteMultipartUploadRequest request, CancellationToken cancellationToken)
     {
-        var response = await _s3Client.CompleteMultipartUploadAsync(request);
+        var response = await _s3Client.CompleteMultipartUploadAsync(request, cancellationToken);
     }
 }

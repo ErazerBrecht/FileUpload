@@ -30,11 +30,13 @@ internal class FileService : IFileService
     private readonly IDataProtector _protector;
     private readonly HttpContext _httpContext;
 
-    public FileService(IDataProtectionProvider dataProtectionProvider, IS3Service s3Service, IHttpContextAccessor httpContextAccessor)
+    public FileService(IDataProtectionProvider dataProtectionProvider, IS3Service s3Service,
+        IHttpContextAccessor httpContextAccessor)
     {
         _protector = dataProtectionProvider.CreateProtector("ErazerBrecht.Files.V1");
         _s3Service = s3Service ?? throw new ArgumentNullException(nameof(s3Service));
-        _httpContext = httpContextAccessor?.HttpContext ?? throw new ArgumentException(null, nameof(httpContextAccessor));
+        _httpContext = httpContextAccessor?.HttpContext ??
+                       throw new ArgumentException(null, nameof(httpContextAccessor));
     }
 
     public async Task<bool> UploadFile()
@@ -45,11 +47,11 @@ internal class FileService : IFileService
         var section = await reader.ReadNextSectionAsync();
 
         var hasContentDispositionHeader = ContentDispositionHeaderValue.TryParse(
-            section.ContentDisposition, out var contentDisposition);
+            section?.ContentDisposition, out var contentDisposition);
 
         if (!hasContentDispositionHeader || !HasFileContentDisposition(contentDisposition))
             return false;
-        
+
         // AES Key generation
         using var aes = Aes.Create();
         var encryptor = aes.CreateEncryptor(aes.Key, aes.IV);
@@ -60,10 +62,15 @@ internal class FileService : IFileService
         Buffer.BlockCopy(aes.IV, 0, keys, aes.Key.Length, aes.IV.Length);
         var encryptedKeys = _protector.Protect(keys); // Results in 148 bytes
 
+        await using var s3Stream = new S3UploadStream(_s3Service,
+            $"{Guid.NewGuid().ToString()}-{contentDisposition!.FileName}", new Dictionary<string, string>
+            {
+                { "EncryptionKey", Convert.ToBase64String(encryptedKeys) }
+            });
+        
         // Encrypt content
-        await using var s3Stream = new S3Stream(_s3Service, Guid.NewGuid().ToString());
         await using var cryptoStream = new CryptoStream(s3Stream, encryptor, CryptoStreamMode.Write);
-        await section.Body.CopyToAsync(cryptoStream);
+        await section!.Body.CopyToAsync(cryptoStream);
 
         return true;
     }
