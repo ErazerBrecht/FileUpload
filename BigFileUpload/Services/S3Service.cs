@@ -29,12 +29,19 @@ public static partial class ServiceCollectionExtensions
 internal class S3Service : IS3Service
 {
     private readonly IAmazonS3 _s3Client;
+    private readonly IConfiguration _configuration;
     private readonly ILogger<S3Service> _logger;
 
-    public S3Service(IAmazonS3 s3Service, ILogger<S3Service> logger)
+    private string BucketName => _configuration.GetValue<string>("Aws:BucketName");
+
+    public S3Service(IAmazonS3 s3Service, IConfiguration configuration, ILogger<S3Service> logger)
     {
         _s3Client = s3Service ?? throw new ArgumentNullException(nameof(s3Service));
+        _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+
+        if (BucketName is null)
+            throw new ArgumentException("BucketName not found in configuration", nameof(configuration));
     }
 
     public async Task<string> InitiateUploadAsync(string fileName, Dictionary<string, string>? metaData = null,
@@ -42,7 +49,7 @@ internal class S3Service : IS3Service
     {
         var request = new InitiateMultipartUploadRequest
         {
-            BucketName = "brecht-bigfileupload",
+            BucketName = BucketName,
             Key = fileName,
         };
 
@@ -62,7 +69,7 @@ internal class S3Service : IS3Service
         
         var request = new UploadPartRequest
         {
-            BucketName = "brecht-bigfileupload",
+            BucketName = BucketName,
             Key = part.FileName,
             UploadId = part.UploadId,
             PartSize = part.Size,
@@ -84,7 +91,7 @@ internal class S3Service : IS3Service
     {
         var request = new CompleteMultipartUploadRequest
         {
-            BucketName = "brecht-bigfileupload",
+            BucketName = BucketName,
             Key = fileName,
             UploadId = id,
             PartETags = eTags
@@ -96,7 +103,7 @@ internal class S3Service : IS3Service
     {
         var request = new GetObjectMetadataRequest
         {
-            BucketName = "brecht-bigfileupload",
+            BucketName = BucketName,
             Key = fileName
         };
         var response = await _s3Client.GetObjectMetadataAsync(request, ct);
@@ -107,7 +114,7 @@ internal class S3Service : IS3Service
     {
         var request = new GetObjectRequest
         {
-            BucketName = "brecht-bigfileupload",
+            BucketName = BucketName,
             Key = fileName
         };
         var response = await _s3Client.GetObjectAsync(request, ct);

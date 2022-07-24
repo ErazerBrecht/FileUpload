@@ -29,7 +29,7 @@ public interface IFileService
 internal class FileService : IFileService
 {
     private const string EncryptionKeyHeader = "EncryptionKey";
-    private const string OriginalContentSize = "OriginalContentSize";
+    private const string OriginalContentSizeHeader = "OriginalContentSize";
 
     private readonly IS3Service _s3Service;
     private readonly IDataProtector _protector;
@@ -73,7 +73,7 @@ internal class FileService : IFileService
         };
 
         if (_httpContext.Request.ContentLength.HasValue)
-            metaData.Add(OriginalContentSize,
+            metaData.Add(OriginalContentSizeHeader,
                 CalculateFileSize(_httpContext.Request.ContentLength.Value, boundary, section!).ToString());
 
         await using var s3Stream = new S3UploadStream(_s3Service,
@@ -113,8 +113,8 @@ internal class FileService : IFileService
 
             // Stream to client
             _httpContext.Response.ContentType = "application/octet-stream";
-            if (metaData[OriginalContentSize.ToLower()] is not null)
-                _httpContext.Response.ContentLength = Convert.ToInt64(metaData[OriginalContentSize.ToLower()]);
+            if (metaData[OriginalContentSizeHeader.ToLower()] is not null)
+                _httpContext.Response.ContentLength = Convert.ToInt64(metaData[OriginalContentSizeHeader.ToLower()]);
 
             await cryptoStream.CopyToAsync(_httpContext.Response.Body, cancellationToken);
         }
@@ -186,7 +186,7 @@ internal class FileService : IFileService
         // Header length (90)  
         // In this case Content-Disposition & Content-Type
         // +2 because the ': ' 
-        // +2 because the endline (/r/n)
+        // +2 because the newline (/r/n)
         // TOTAL: 84 + 6 + 90 = 180
         return multipartSection.Headers.Aggregate(sizeWithoutBoundary,
             (current, header) => current - (header.Key.Length + header.Value.ToString().Length + 2 + 2));

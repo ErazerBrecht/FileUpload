@@ -4,7 +4,7 @@ using BigFileUpload.Services;
 
 namespace BigFileUpload.SeedWork;
 
-public class S3UploadStream : Stream, IDisposable
+public class S3UploadStream : Stream
 {
     private bool _canWrite;
 
@@ -16,7 +16,6 @@ public class S3UploadStream : Stream, IDisposable
 
     // S3 specific parameters
     private readonly IS3Service _s3Service;
-    private const string BucketName = "brecht-bigfileupload";
     private readonly string _fileName;
     private readonly Dictionary<string, string>? _fileMetadata;
     private string? _uploadId;
