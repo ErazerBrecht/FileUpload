@@ -18,19 +18,22 @@ public interface IS3Service
 
 public static partial class ServiceCollectionExtensions
 {
-    public static IServiceCollection AddS3(this IServiceCollection services) =>
-        services.AddSingleton<IS3Service, S3Service>();
+    public static IServiceCollection AddS3(this IServiceCollection services)
+    {
+        return services
+            .AddAWSService<IAmazonS3>()
+            .AddSingleton<IS3Service, S3Service>();
+    }
 }
 
 internal class S3Service : IS3Service
 {
+    private readonly IAmazonS3 _s3Client;
     private readonly ILogger<S3Service> _logger;
 
-    private AmazonS3Client _s3Client = new("AKIAXWRSOIIHBAJYW2DP",
-        "j+4IEnGX+9ompOGdSNu0qNPSiq43jVxuLbDqVE52", RegionEndpoint.EUCentral1);
-
-    public S3Service(ILogger<S3Service> logger)
+    public S3Service(IAmazonS3 s3Service, ILogger<S3Service> logger)
     {
+        _s3Client = s3Service ?? throw new ArgumentNullException(nameof(s3Service));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
