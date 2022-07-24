@@ -10,7 +10,7 @@ public class S3UploadStream : Stream, IDisposable
 
     // TODO Configurable???
     private const int PartSize = 5 * 1024 * 1024;
-    
+
     private byte[]? _inputBuffer;
     private MemoryStream? _inputBufferStream;
 
@@ -37,18 +37,12 @@ public class S3UploadStream : Stream, IDisposable
 
     public override async Task FlushAsync(CancellationToken cancellationToken)
     {
-        if (!CanWrite) 
+        if (!CanWrite)
             return;
         if (_inputBufferStream?.Position > 0)
-            await WriteToS3(cancellationToken);
-
-        await _s3Service.CompleteUploadAsync(new CompleteMultipartUploadRequest
-        {
-            BucketName = BucketName,
-            Key = _fileName,
-            UploadId = _uploadId,
-            PartETags = _partETags
-        }, cancellationToken);
+            await WriteToS3(true, cancellationToken);
+        if (_uploadId is not null && _partETags is not null)
+            await _s3Service.CompleteUploadAsync(_fileName, _uploadId, _partETags, cancellationToken);
     }
 
     public override int Read(byte[] buffer, int offset, int count)
@@ -79,7 +73,7 @@ public class S3UploadStream : Stream, IDisposable
             throw new ArgumentOutOfRangeException(nameof(count));
         if (buffer.Length - offset < count)
             throw new ArgumentException("Invalid offset", nameof(offset));
-        
+
         await WriteAsync(buffer.AsMemory(offset, count), cancellationToken);
     }
 
@@ -87,16 +81,16 @@ public class S3UploadStream : Stream, IDisposable
     {
         if (!CanWrite)
             throw new NotSupportedException();
-        
+
         _inputBuffer ??= ArrayPool<byte>.Shared.Rent(PartSize + 100 * 1024);
         _inputBufferStream ??= new MemoryStream(_inputBuffer);
-        
+
         await _inputBufferStream.WriteAsync(buffer, cancellationToken);
 
         // We have loaded a full part in memory
         // Send it to S3
         if (PartSize < _inputBufferStream.Position)
-            await WriteToS3(cancellationToken);
+            await WriteToS3(false, cancellationToken);
     }
 
     protected override void Dispose(bool disposing)
@@ -104,11 +98,11 @@ public class S3UploadStream : Stream, IDisposable
         try
         {
             base.Dispose(disposing);
-            
+
             // Cleanup
             _uploadId = null;
             _partETags = null;
-            
+
             _inputBufferStream?.Dispose();
 
             if (_inputBuffer is not null)
@@ -121,7 +115,7 @@ public class S3UploadStream : Stream, IDisposable
     }
 
     public override bool CanWrite => _canWrite;
-    
+
     // This stream is meant for Uploading to S3
     // Reading == Downloading
     public override bool CanRead => false;
@@ -134,41 +128,21 @@ public class S3UploadStream : Stream, IDisposable
         set => throw new NotSupportedException();
     }
 
-    private async Task WriteToS3(CancellationToken cancellationToken)
+    private async Task WriteToS3(bool isLastPart, CancellationToken cancellationToken = default)
     {
         if (_inputBuffer is null || _inputBufferStream is null)
             throw new Exception("TODO");
-        
-        if (_uploadId == null)
-        {
-            var request = new InitiateMultipartUploadRequest
-            {
-                BucketName = BucketName,
-                Key = _fileName,
-            };
 
-            if (_fileMetadata is not null)
-                foreach (var x in _fileMetadata)
-                    request.Metadata.Add(x.Key.ToLower(),  x.Value);
-
-            _uploadId = await _s3Service.InitiateUploadAsync(request, cancellationToken);
-        }
+        _uploadId ??= await _s3Service.InitiateUploadAsync(_fileName, _fileMetadata, cancellationToken);
 
         _partETags ??= new List<PartETag>();
         var partSize = _inputBufferStream.Position;
         var partNumber = _partETags.Count + 1;
         _inputBufferStream.Position = 0;
 
-        _partETags.Add(await _s3Service.UploadPartAsync(new UploadPartRequest
-        {
-            BucketName = BucketName,
-            Key = _fileName,
-            UploadId = _uploadId,
-            InputStream = _inputBufferStream,
-            PartSize = partSize,
-            PartNumber = partNumber,
-            IsLastPart = false
-        }, cancellationToken));
+        _partETags.Add(await _s3Service.UploadPartAsync(
+            new UploadPart(_fileName, _uploadId, partNumber, partSize, isLastPart), 
+            _inputBufferStream, cancellationToken));
 
         _inputBufferStream = new MemoryStream(_inputBuffer);
     }

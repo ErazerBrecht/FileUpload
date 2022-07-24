@@ -4,7 +4,7 @@ public class InvalidS3FileException : Exception
 {
     public readonly InvalidS3FileReason Reason;
 
-    public InvalidS3FileException(InvalidS3FileReason reason, string message = null, Exception innerException = null) :
+    public InvalidS3FileException(InvalidS3FileReason reason, string? message = null, Exception? innerException = null) :
         base(message, innerException)
     {
         Reason = reason;

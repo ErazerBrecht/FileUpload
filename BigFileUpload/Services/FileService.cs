@@ -89,11 +89,7 @@ internal class FileService : IFileService
     {
         try
         {
-            var metaData = await _s3Service.GetMetaDataAsync(new GetObjectMetadataRequest
-            {
-                BucketName = "brecht-bigfileupload",
-                Key = fileName
-            }, cancellationToken);
+            var metaData = await _s3Service.GetMetaDataAsync(fileName, cancellationToken);
 
             // Get encrypted AES key
             var encryptedKeysBase64 = metaData[EncryptionKeyHeader.ToLower()];
@@ -110,13 +106,8 @@ internal class FileService : IFileService
             using var decryptor = aes.CreateDecryptor(aes.Key, aes.IV);
 
             // Start download
-            await using var downloadStream = await _s3Service.GetObjectAsync(new GetObjectRequest
-            {
-                BucketName = "brecht-bigfileupload",
-                Key = fileName
-            }, cancellationToken);
-
-
+            await using var downloadStream = await _s3Service.GetObjectAsync(fileName, cancellationToken);
+            
             // Decrypting content
             await using var cryptoStream = new CryptoStream(downloadStream, decryptor, CryptoStreamMode.Read);
 
