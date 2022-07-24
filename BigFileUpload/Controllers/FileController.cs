@@ -1,4 +1,5 @@
 using BigFileUpload.SeedWork;
+using BigFileUpload.SeedWork.Exceptions;
 using BigFileUpload.Services;
 using Microsoft.AspNetCore.Mvc;
 
@@ -39,8 +40,20 @@ public class FileController : ControllerBase
     }
     
     [HttpGet("{name}")]
-    public async Task Download(string name)
+    public async Task<IActionResult?> Download(string name)
     {
-        await _fileService.DownloadFile(name);
+        try
+        {
+            await _fileService.DownloadFile(name);
+            return new EmptyResult();
+        }
+        catch (InvalidS3FileException ex)
+        {
+            return ex switch
+            {
+                { Reason: InvalidS3FileReason.NotFound } => BadRequest(),
+                _ => Problem()
+            };
+        }
     }
 }
