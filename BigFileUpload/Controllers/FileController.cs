@@ -1,59 +1,30 @@
 using BigFileUpload.SeedWork;
-using BigFileUpload.SeedWork.Exceptions;
 using BigFileUpload.Services;
 using Microsoft.AspNetCore.Mvc;
 
 namespace BigFileUpload.Controllers;
 
-[ApiController]
 [Route("[controller]")]
-public class FileController : ControllerBase
+public class FileController : BaseController
 {
-    private readonly ILogger<FileController> _logger;
     private readonly IFileService _fileService;
 
-    public FileController(ILogger<FileController> logger, IFileService fileService)
-    {
-        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+    public FileController(IFileService fileService) => 
         _fileService = fileService ?? throw new ArgumentNullException(nameof(fileService));
-    }
 
     [HttpPost]
     [FileUploadOperation.FileContentType]
-    public async Task<IActionResult> Post()
-    {
-        if (!_fileService.IsMultipartContentType(Request.ContentType))
-        {
-            ModelState.AddModelError("File", $"The request couldn't be processed");
-            return BadRequest(ModelState);
-        }
-        
-        try
-        {
-            return await _fileService.UploadFile() ? Ok() : BadRequest();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Something failed uploading the file");
-            throw;
-        }
-    }
+    [RequestSizeLimit(5L * 1024 * 1024 * 1024)]
+    public async Task<IActionResult> UploadFile() => 
+        Result(await _fileService.UploadFile(HttpContext.RequestAborted));
+    
+    [HttpPost("image")]
+    [FileUploadOperation.FileContentType]
+    [RequestSizeLimit(10 * 1024 * 1024)]
+    public async Task<IActionResult> UploadImage() => 
+        Result(await _fileService.UploadImage(HttpContext.RequestAborted));
     
     [HttpGet("{name}")]
-    public async Task<IActionResult?> Download(string name)
-    {
-        try
-        {
-            await _fileService.DownloadFile(name);
-            return new EmptyResult();
-        }
-        catch (InvalidS3FileException ex)
-        {
-            return ex switch
-            {
-                { Reason: InvalidS3FileReason.NotFound } => BadRequest(),
-                _ => Problem()
-            };
-        }
-    }
+    public async Task<IActionResult> Download(string? name) => 
+        Result(await _fileService.DownloadFile(name, HttpContext.RequestAborted));
 }

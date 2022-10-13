@@ -1,13 +1,16 @@
 ﻿using System.Net;
-using System.Net.Mime;
 using System.Security.Cryptography;
 using Amazon.S3;
-using Amazon.S3.Model;
 using BigFileUpload.SeedWork;
 using BigFileUpload.SeedWork.Exceptions;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.Net.Http.Headers;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Formats;
+using SixLabors.ImageSharp.Formats.Gif;
+using SixLabors.ImageSharp.Formats.Jpeg;
+using SixLabors.ImageSharp.Formats.Png;
 using Aes = System.Security.Cryptography.Aes;
 
 namespace BigFileUpload.Services;
@@ -20,10 +23,9 @@ public static partial class ServiceCollectionExtensions
 
 public interface IFileService
 {
-    bool IsMultipartContentType(string? contentType);
-
-    Task<bool> UploadFile(CancellationToken cancellationToken = default);
-    Task DownloadFile(string fileName, CancellationToken cancellationToken = default);
+    Task<Result> UploadFile(CancellationToken cancellationToken = default);
+    Task<Result> UploadImage(CancellationToken cancellationToken = default);
+    Task<Result> DownloadFile(string fileName, CancellationToken cancellationToken = default);
 }
 
 internal class FileService : IFileService
@@ -34,58 +36,160 @@ internal class FileService : IFileService
     private readonly IS3Service _s3Service;
     private readonly IDataProtector _protector;
     private readonly HttpContext _httpContext;
+    private readonly ILogger<FileService> _logger;
 
     public FileService(IDataProtectionProvider dataProtectionProvider, IS3Service s3Service,
-        IHttpContextAccessor httpContextAccessor)
+        IHttpContextAccessor httpContextAccessor, ILogger<FileService> logger)
     {
         _protector = dataProtectionProvider.CreateProtector("ErazerBrecht.Files.V1");
         _s3Service = s3Service ?? throw new ArgumentNullException(nameof(s3Service));
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _httpContext = httpContextAccessor?.HttpContext ??
                        throw new ArgumentException(null, nameof(httpContextAccessor));
     }
 
-    public async Task<bool> UploadFile(CancellationToken cancellationToken = default)
+    public async Task<Result> UploadFile(CancellationToken cancellationToken = default)
     {
-        var boundary = GetBoundary(MediaTypeHeaderValue.Parse(_httpContext.Request.ContentType));
-        var reader = new MultipartReader(boundary, _httpContext.Request.Body);
-
-        var section = await reader.ReadNextSectionAsync(cancellationToken);
-
-        var hasContentDispositionHeader = ContentDispositionHeaderValue.TryParse(
-            section?.ContentDisposition, out var contentDisposition);
-
-        if (!hasContentDispositionHeader || !HasFileContentDisposition(contentDisposition))
-            return false;
-
-        // AES Key generation
-        using var aes = Aes.Create();
-        var encryptor = aes.CreateEncryptor(aes.Key, aes.IV);
-
-        // Add AES key encrypted with 'DataProtector' in file
-        var keys = new byte[aes.Key.Length + aes.IV.Length];
-        Buffer.BlockCopy(aes.Key, 0, keys, 0, aes.Key.Length);
-        Buffer.BlockCopy(aes.IV, 0, keys, aes.Key.Length, aes.IV.Length);
-        var encryptedKeys = _protector.Protect(keys); // Results in 148 bytes
-
-        var metaData = new Dictionary<string, string>
+        try
         {
-            { EncryptionKeyHeader, Convert.ToBase64String(encryptedKeys) },
-        };
+            var multipart = await GetMultipart(cancellationToken);
+            if (multipart.Error is not null) return multipart.Error;
 
-        if (_httpContext.Request.ContentLength.HasValue)
-            metaData.Add(OriginalContentSizeHeader,
-                CalculateFileSize(_httpContext.Request.ContentLength.Value, boundary, section!).ToString());
+            // AES Key generation
+            using var aes = Aes.Create();
+            var encryptor = aes.CreateEncryptor(aes.Key, aes.IV);
 
-        await using var s3Stream = new S3UploadStream(_s3Service,
-            $"{Guid.NewGuid().ToString()}-{contentDisposition!.FileName}", metaData);
+            // Add AES key encrypted with 'DataProtector' in file
+            var encryptedKeys = EncryptKeys(aes);
+            var metaData = new Dictionary<string, string>
+            {
+                {EncryptionKeyHeader, Convert.ToBase64String(encryptedKeys)},
+            };
 
-        // Encrypt content
-        await using var cryptoStream = new CryptoStream(s3Stream, encryptor, CryptoStreamMode.Write);
-        await section!.Body.CopyToAsync(cryptoStream, cancellationToken);
-        return true;
+            // if (_httpContext.Request.ContentLength.HasValue)
+            //     metaData.Add(OriginalContentSizeHeader,
+            //         CalculateFileSize(_httpContext.Request.ContentLength.Value, boundary, section!).ToString());
+
+            var fileName = $"{Guid.NewGuid().ToString()}-{multipart.Header.FileName}";
+            await using (var s3Stream = new S3UploadStream(_s3Service, fileName, metaData))
+            {
+                await using var cryptoStream = new S3CryptoUploadStream(s3Stream, encryptor);
+                await multipart.Body.CopyToAsync(cryptoStream, cancellationToken);
+                await cryptoStream.CompleteAsync(cancellationToken);
+            }
+
+            return Result.Success();
+        }
+        catch (InvalidRequestException ex)
+        {
+            return Result.BadRequest(ex.Message);
+        }
+        catch (BadHttpRequestException ex)
+        {
+            return Result.BadRequest(ex.Message);
+        }
+        catch (OperationCanceledException ex)
+        {
+            _logger.LogInformation(ex, "Operation was cancelled");
+            return Result.BadRequest("Operation cancelled");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Something went wrong uploading a file");
+            return Result.Failed();
+        }
     }
 
-    public async Task DownloadFile(string fileName, CancellationToken cancellationToken = default)
+    public async Task<Result> UploadImage(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var multipart = await GetMultipart(cancellationToken);
+            if (multipart.Error is not null) return multipart.Error!;
+
+            // AES Key generation
+            using var aes = Aes.Create();
+            var encryptor = aes.CreateEncryptor(aes.Key, aes.IV);
+
+            // Add AES key encrypted with 'DataProtector' in file
+            var encryptedKeys = EncryptKeys(aes);
+            var metaData = new Dictionary<string, string>
+            {
+                {EncryptionKeyHeader, Convert.ToBase64String(encryptedKeys)},
+            };
+
+            // if (_httpContext.Request.ContentLength.HasValue)
+            //     metaData.Add(OriginalContentSizeHeader,
+            //         CalculateFileSize(_httpContext.Request.ContentLength.Value, boundary, section!).ToString());
+
+            var fileName = $"{Guid.NewGuid().ToString()}-{multipart.Header.FileName}";
+
+            #region Image processing
+            
+            using var ms = new MemoryStream();
+            await multipart.Body.CopyToAsync(ms, cancellationToken);
+            var (imageInfo, fileType) = await Image.LoadWithFormatAsync(ms, cancellationToken);
+            if (imageInfo is null || fileType is null)
+                return Result.BadRequest("Invalid file");
+            
+            var rawAmountOfBits = imageInfo.PixelType.BitsPerPixel * imageInfo.Height * (long) imageInfo.Width;
+            // Max limit on 40MP with 32bit per pixel (160Mb RAW DATA)
+            // This check is to prevent lotta pixel attack
+            if (rawAmountOfBits > 40L * 1000 * 1000 * 32)
+                return Result.BadRequest("Invalid file, too many pixels");
+
+            var image = await Image.LoadAsync(ms, cancellationToken);
+            image.Metadata.ExifProfile = null;
+            image.Metadata.IccProfile = null;
+            image.Metadata.IptcProfile = null;
+            image.Metadata.XmpProfile = null;
+
+            IImageEncoder encoder;
+            if (fileType == JpegFormat.Instance)
+                encoder = new JpegEncoder {Quality = 70};
+            else if (fileType == PngFormat.Instance)
+                encoder = new PngEncoder {CompressionLevel = PngCompressionLevel.Level7, IgnoreMetadata = true};
+            else if (fileType == GifFormat.Instance)
+                encoder = new GifEncoder();
+            else
+                return Result.Failed("Invalid file type");
+
+            #endregion
+            
+            await using (var s3Stream = new S3UploadStream(_s3Service, fileName, metaData))
+            {
+                await using var cryptoStream = new S3CryptoUploadStream(s3Stream, encryptor);
+                await image.SaveAsync(cryptoStream, encoder, cancellationToken);
+                await cryptoStream.CompleteAsync(cancellationToken);
+            }
+
+            return Result.Success();
+        }
+        catch (InvalidRequestException ex)
+        {
+            return Result.BadRequest(ex.Message);
+        }
+        catch (BadHttpRequestException ex)
+        {
+            return Result.BadRequest(ex.Message);
+        }
+        catch (ImageFormatException)
+        {
+            return Result.BadRequest("Invalid file");
+        }
+        catch (OperationCanceledException ex)
+        {
+            _logger.LogInformation(ex, "Operation was cancelled");
+            return Result.BadRequest("Operation cancelled");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Something went wrong uploading a file");
+            return Result.Failed();
+        }
+    }
+
+    public async Task<Result> DownloadFile(string fileName, CancellationToken cancellationToken = default)
     {
         try
         {
@@ -93,7 +197,11 @@ internal class FileService : IFileService
 
             // Get encrypted AES key
             var encryptedKeysBase64 = metaData[EncryptionKeyHeader.ToLower()];
-            if (encryptedKeysBase64 is null) throw new InvalidS3FileException(InvalidS3FileReason.NoEncryptionKeys);
+            if (encryptedKeysBase64 is null)
+            {
+                _logger.LogError("File {FileName} doesn't have encryption keys, cannot decrypt content", fileName);
+                return Result.Failed();
+            }
 
             // Decode + Decrypt AES key + Creating AES decryptor
             var encryptedKeys = Convert.FromBase64String(encryptedKeysBase64);
@@ -103,34 +211,68 @@ internal class FileService : IFileService
             // IV == 16 bytes (128bit)
             aes.Key = decryptedKeys.AsMemory(0, 32).ToArray();
             aes.IV = decryptedKeys.AsMemory(32, 16).ToArray();
-            using var decryptor = aes.CreateDecryptor(aes.Key, aes.IV);
+            var decryptor = aes.CreateDecryptor(aes.Key, aes.IV);
 
             // Start download
-            await using var downloadStream = await _s3Service.GetObjectAsync(fileName, cancellationToken);
-            
+            var downloadStream = await _s3Service.GetObjectAsync(fileName, cancellationToken);
+
             // Decrypting content
-            await using var cryptoStream = new CryptoStream(downloadStream, decryptor, CryptoStreamMode.Read);
+            var cryptoStream = new CryptoStream(downloadStream, decryptor, CryptoStreamMode.Read);
 
-            // Stream to client
-            _httpContext.Response.ContentType = "application/octet-stream";
-            if (metaData[OriginalContentSizeHeader.ToLower()] is not null)
-                _httpContext.Response.ContentLength = Convert.ToInt64(metaData[OriginalContentSizeHeader.ToLower()]);
+            // if (metaData[OriginalContentSizeHeader.ToLower()] is not null)
+            //     _httpContext.Response.ContentLength = Convert.ToInt64(metaData[OriginalContentSizeHeader.ToLower()]);
 
-            await cryptoStream.CopyToAsync(_httpContext.Response.Body, cancellationToken);
+            return Result.File(cryptoStream, fileName);
+        }
+        catch (OperationCanceledException ex)
+        {
+            _logger.LogInformation(ex, "Operation was cancelled");
+            return Result.BadRequest("Operation cancelled");
         }
         catch (AmazonS3Exception ex)
         {
-            switch (ex)
-            {
-                case { StatusCode: HttpStatusCode.NotFound }:
-                    throw new InvalidS3FileException(InvalidS3FileReason.NotFound, innerException: ex);
-                default:
-                    throw;
-            }
+            if (ex is {StatusCode: HttpStatusCode.NotFound})
+                return Result.BadRequest("File not found");
+
+            _logger.LogError(ex, "Something went wrong uploading a file");
+            return Result.Failed();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Something went wrong uploading a file");
+            throw;
         }
     }
+    
+    private byte[] EncryptKeys(SymmetricAlgorithm symmetricAlgorithm)
+    {
+        var keys = new byte[symmetricAlgorithm.Key.Length + symmetricAlgorithm.IV.Length];
+        Buffer.BlockCopy(symmetricAlgorithm.Key, 0, keys, 0, symmetricAlgorithm.Key.Length);
+        Buffer.BlockCopy(symmetricAlgorithm.IV, 0, keys, symmetricAlgorithm.Key.Length, symmetricAlgorithm.IV.Length);
+        var encryptedKeys = _protector.Protect(keys); // Results in 148 bytes
+        return encryptedKeys;
+    }
+    
+    private async Task<MultipartValue> GetMultipart(CancellationToken cancellationToken)
+    {
+        if (!IsMultipartContentType(_httpContext.Request.ContentType))
+           return new MultipartValue {Error = Result.BadRequest("Invalid Content-Type")};
 
-    public bool IsMultipartContentType(string? contentType)
+        var boundary = GetBoundary(MediaTypeHeaderValue.Parse(_httpContext.Request.ContentType));
+        var reader = new MultipartReader(boundary, _httpContext.Request.Body);
+
+        var section = await reader.ReadNextSectionAsync(cancellationToken);
+
+        var hasContentDispositionHeader = ContentDispositionHeaderValue.TryParse(
+            section?.ContentDisposition, out var contentDisposition);
+
+        if (!hasContentDispositionHeader || contentDisposition == null || !HasFileContentDisposition(contentDisposition))
+            return new MultipartValue {Error = Result.BadRequest("Invalid Content-Type")};
+        
+        return new MultipartValue { Header = contentDisposition, Body = section!.Body};
+    }
+
+    private static bool IsMultipartContentType(string? contentType)
     {
         return !string.IsNullOrEmpty(contentType)
                && contentType.Contains("multipart/", StringComparison.OrdinalIgnoreCase);
@@ -144,12 +286,12 @@ internal class FileService : IFileService
 
         if (string.IsNullOrWhiteSpace(boundary))
         {
-            throw new InvalidDataException("Missing content-type boundary.");
+            throw new InvalidRequestException("Missing content-type boundary.");
         }
 
         if (boundary.Length > lengthLimit)
         {
-            throw new InvalidDataException(
+            throw new InvalidRequestException(
                 $"Multipart boundary length limit {lengthLimit} exceeded.");
         }
 
@@ -164,7 +306,8 @@ internal class FileService : IFileService
                && (!string.IsNullOrEmpty(contentDisposition.FileName.Value)
                    || !string.IsNullOrEmpty(contentDisposition.FileNameStar.Value));
     }
-    
+
+    [Obsolete("This depends too hard on user-input which is never trustable!")]
     private static long CalculateFileSize(long contentLength, string boundary, MultipartSection multipartSection)
     {
         if (multipartSection.Headers == null)
@@ -190,5 +333,12 @@ internal class FileService : IFileService
         // TOTAL: 84 + 6 + 90 = 180
         return multipartSection.Headers.Aggregate(sizeWithoutBoundary,
             (current, header) => current - (header.Key.Length + header.Value.ToString().Length + 2 + 2));
+    }
+    
+    private record MultipartValue
+    {
+        public Result? Error { get; init; }
+        public ContentDispositionHeaderValue Header { get; init; }
+        public Stream Body { get; init; }
     }
 }

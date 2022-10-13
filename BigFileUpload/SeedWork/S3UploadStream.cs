@@ -1,15 +1,18 @@
 ﻿using System.Buffers;
 using Amazon.S3.Model;
+using BigFileUpload.SeedWork.Exceptions;
 using BigFileUpload.Services;
 
 namespace BigFileUpload.SeedWork;
 
-public class S3UploadStream : Stream
+public sealed class S3UploadStream : Stream
 {
     private bool _canWrite;
 
     // TODO Configurable???
     private const int PartSize = 5 * 1024 * 1024;
+    private const long MaxSize = (5L * 1024 * 1024 * 1024) + 256;
+    private static readonly long MaxAmountOfParts = (MaxSize + PartSize - 1) / PartSize;
 
     private byte[]? _inputBuffer;
     private MemoryStream? _inputBufferStream;
@@ -36,12 +39,8 @@ public class S3UploadStream : Stream
 
     public override async Task FlushAsync(CancellationToken cancellationToken)
     {
-        if (!CanWrite)
-            return;
         if (_inputBufferStream?.Position > 0)
             await WriteToS3(true, cancellationToken);
-        if (_uploadId is not null && _partETags is not null)
-            await _s3Service.CompleteUploadAsync(_fileName, _uploadId, _partETags, cancellationToken);
     }
 
     public override int Read(byte[] buffer, int offset, int count)
@@ -81,14 +80,18 @@ public class S3UploadStream : Stream
         if (!CanWrite)
             throw new NotSupportedException();
 
-        _inputBuffer ??= ArrayPool<byte>.Shared.Rent(PartSize + 100 * 1024);
+        // Since images are completely buffered at once (they are converted by ImageSharp)
+        // It can happen we have buffered more than our PartSize already
+        // That's why we need the max value otherwise the underlying buffer would be to small
+        var size = Math.Max(PartSize + 100 * 1024, buffer.Length);
+        _inputBuffer ??= ArrayPool<byte>.Shared.Rent(size);
         _inputBufferStream ??= new MemoryStream(_inputBuffer);
 
         await _inputBufferStream.WriteAsync(buffer, cancellationToken);
 
         // We have loaded a full part in memory
         // Send it to S3
-        if (PartSize < _inputBufferStream.Position)
+        if (_inputBufferStream.Position > PartSize)
             await WriteToS3(false, cancellationToken);
     }
 
@@ -96,16 +99,69 @@ public class S3UploadStream : Stream
     {
         try
         {
+            if (disposing)
+            {
+                // Cancel the upload if there was still one 'active'
+                if (_uploadId is not null)
+                {
+                    // If the aborting fails we want to continue with disposing
+                    // Make sure you implement this in your S3:
+                    // https://aws.amazon.com/blogs/aws-cloud-financial-management/discovering-and-deleting-incomplete-multipart-uploads-to-lower-amazon-s3-costs/#:~:text=If%20the%20complete%20multipart%20upload,are%20stored%20in%20Amazon%20S3
+                    try
+                    {
+                        _s3Service.AbortUploadAsync(_fileName, _uploadId).GetAwaiter().GetResult();
+                    }
+                    finally
+                    {
+                        _uploadId = null;
+                        _partETags = null; 
+                    }
+                }
+
+                // Cleanup
+                _inputBufferStream?.Dispose();
+                _inputBufferStream = null;
+
+                if (_inputBuffer is not null)
+                {
+                    ArrayPool<byte>.Shared.Return(_inputBuffer);
+                    _inputBuffer = null;
+                }
+
+
+            }
+
             base.Dispose(disposing);
+        }
+        finally
+        {
+            _canWrite = false;
+        }
+    }
 
-            // Cleanup
-            _uploadId = null;
-            _partETags = null;
+    public override async ValueTask DisposeAsync()
+    {
+        try
+        {
+            // Cancel the upload if there was still one 'active'
+            if (_uploadId is not null)
+            {
+                // If the aborting fails we want to continue with disposing
+                // Make sure you implement this in your S3:
+                // https://aws.amazon.com/blogs/aws-cloud-financial-management/discovering-and-deleting-incomplete-multipart-uploads-to-lower-amazon-s3-costs/#:~:text=If%20the%20complete%20multipart%20upload,are%20stored%20in%20Amazon%20S3
+                try
+                {
+                   await _s3Service.AbortUploadAsync(_fileName, _uploadId);
+                }
+                finally
+                {
+                    _uploadId = null;
+                    _partETags = null; 
+                }
+            }
 
-            _inputBufferStream?.Dispose();
-
-            if (_inputBuffer is not null)
-                ArrayPool<byte>.Shared.Return(_inputBuffer);
+            // This will eventually call the synchronous Dispose method which will clean-up the buffer
+            await base.DisposeAsync();
         }
         finally
         {
@@ -126,6 +182,17 @@ public class S3UploadStream : Stream
         get => throw new NotSupportedException();
         set => throw new NotSupportedException();
     }
+    
+    public async Task CompleteAsync(CancellationToken cancellationToken)
+    {
+        if (_uploadId is not null)
+        {
+            await _s3Service.CompleteUploadAsync(_fileName, _uploadId, _partETags!, cancellationToken);
+            _uploadId = null;
+            _partETags = null;
+            _canWrite = false;
+        }
+    }
 
     private async Task WriteToS3(bool isLastPart, CancellationToken cancellationToken = default)
     {
@@ -139,8 +206,11 @@ public class S3UploadStream : Stream
         var partNumber = _partETags.Count + 1;
         _inputBufferStream.Position = 0;
 
+        if (partNumber > MaxAmountOfParts)
+            throw new InvalidRequestException("File exceeded max supported file size");
+
         _partETags.Add(await _s3Service.UploadPartAsync(
-            new UploadPart(_fileName, _uploadId, partNumber, partSize, isLastPart), 
+            new UploadPart(_fileName, _uploadId, partNumber, partSize, isLastPart),
             _inputBufferStream, cancellationToken));
 
         _inputBufferStream = new MemoryStream(_inputBuffer);

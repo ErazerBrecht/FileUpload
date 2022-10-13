@@ -1,5 +1,8 @@
 using BigFileUpload.SeedWork;
 using BigFileUpload.Services;
+using SixLabors.ImageSharp;
+
+Configuration.Default.ReadOrigin = ReadOrigin.Begin;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.ConfigureKestrel(x => x.Limits.MaxRequestBodySize = 5368709120);

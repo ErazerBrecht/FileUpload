@@ -1,5 +1,4 @@
-﻿using Amazon;
-using Amazon.S3;
+﻿using Amazon.S3;
 using Amazon.S3.Model;
 
 namespace BigFileUpload.Services;
@@ -11,6 +10,7 @@ public interface IS3Service
 
     Task<PartETag> UploadPartAsync(UploadPart part, Stream stream, CancellationToken ct = default);
     Task CompleteUploadAsync(string fileName, string id, List<PartETag> eTags, CancellationToken ct = default);
+    Task AbortUploadAsync(string fileName, string id, CancellationToken ct = default);
 
     Task<MetadataCollection> GetMetaDataAsync(string fileName, CancellationToken ct = default);
     Task<Stream> GetObjectAsync(string fileName, CancellationToken ct = default);
@@ -34,9 +34,10 @@ internal class S3Service : IS3Service
 
     private string BucketName => _configuration.GetValue<string>("Aws:BucketName");
 
-    public S3Service(IAmazonS3 s3Service, IConfiguration configuration, ILogger<S3Service> logger)
+    public S3Service(IAmazonS3 s3Client, IConfiguration configuration, ILogger<S3Service> logger)
     {
-        _s3Client = s3Service ?? throw new ArgumentNullException(nameof(s3Service));
+        (s3Client.Config as AmazonS3Config).ForcePathStyle = true;
+        _s3Client = s3Client ?? throw new ArgumentNullException(nameof(s3Client));
         _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
 
@@ -89,6 +90,8 @@ internal class S3Service : IS3Service
     public async Task CompleteUploadAsync(string fileName, string id, List<PartETag> eTags,
         CancellationToken ct)
     {
+        _logger.LogDebug("Completing upload for {FileName} with Upload Id: {RequestUploadId})", fileName, id);
+        
         var request = new CompleteMultipartUploadRequest
         {
             BucketName = BucketName,
@@ -97,6 +100,19 @@ internal class S3Service : IS3Service
             PartETags = eTags
         };
         await _s3Client.CompleteMultipartUploadAsync(request, ct);
+    }
+
+    public async Task AbortUploadAsync(string fileName, string id, CancellationToken ct = default)
+    {
+        _logger.LogDebug("Cancelling upload for {FileName} with Upload Id: {RequestUploadId})", fileName, id);
+        
+        var request = new AbortMultipartUploadRequest
+        {
+            BucketName = BucketName,
+            Key = fileName,
+            UploadId = id,
+        };
+        await _s3Client.AbortMultipartUploadAsync(request, ct);
     }
 
     public async Task<MetadataCollection> GetMetaDataAsync(string fileName, CancellationToken ct = default)
